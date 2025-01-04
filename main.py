@@ -32,6 +32,7 @@ class MovieRecommender:
             self.user_profiles = self.load_user_profiles()
             self.MIN_RATINGS_FOR_RECOMMENDATIONS = 5
             self.prepare_data()
+            self.create_tfidf_matrix()
 
         except FileNotFoundError as e:
             st.error(f"Error: {e}. Por favor, verifica que el archivo exista en el directorio correcto.")
@@ -46,7 +47,7 @@ class MovieRecommender:
     def prepare_data(self):
         """
         Prepara los datos para el sistema de recomendación.
-        Limpia y procesa las columnas necesarias.
+        Limpia y procesa las columnas necesarias y elimina duplicados.
         """
         try:
             required_columns = ['title', 'genre', 'year', 'critic_score', 'people_score']
@@ -54,15 +55,22 @@ class MovieRecommender:
                 if col not in self.data.columns:
                     raise KeyError(f"La columna requerida '{col}' no está presente en el dataset.")
 
+            # Eliminar películas duplicadas
+            self.data = self.data.drop_duplicates(subset=['title', 'year'], keep='first').reset_index(drop=True)
+
             # Procesar la columna 'genre'
             self.data['genre'] = self.data['genre'].apply(lambda x: x.split('|') if pd.notnull(x) else [])
 
             # Completar valores faltantes
             self.data['critic_score'] = self.data['critic_score'].fillna(0)
             self.data['people_score'] = self.data['people_score'].fillna(0)
-
         except Exception as e:
             raise RuntimeError(f"Error al preparar los datos: {e}")
+
+  
+    def create_tfidf_matrix(self):
+        self.data['synopsis'] = self.data['synopsis'].fillna('')
+        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(self.data['synopsis'])
 
     def load_user_profiles(self):
         """
@@ -130,6 +138,13 @@ class MovieRecommender:
                 'language_preferences': {}
             }
             self.save_user_profiles()
+    
+    def get_movie_similarity(self, movie_idx):
+        movie_vector = self.tfidf_matrix[movie_idx]
+        similarity_scores = cosine_similarity(movie_vector, self.tfidf_matrix).flatten()
+        similar_indices = similarity_scores.argsort()[::-1][1:11]  # Top 10 similares, excluyendo la misma película
+        return self.data.iloc[similar_indices][['title', 'year', 'genre']]
+
 
     def rate_movie(self, user_id, movie_idx, rating):
         """
@@ -154,16 +169,40 @@ class MovieRecommender:
         return len(self.user_profiles[user_id]['ratings']) >= self.MIN_RATINGS_FOR_RECOMMENDATIONS
 
     def get_user_recommendations(self, user_id):
-        """
-        Genera recomendaciones de películas para un usuario
-        """
         if user_id not in self.user_profiles:
             return pd.DataFrame()
+        
+        user_ratings = self.user_profiles[user_id]['ratings']
+        if not user_ratings:
+            return pd.DataFrame()
+        
+        # Obtener todas las películas valoradas por el usuario
+        rated_movies = list(map(int, user_ratings.keys()))
+        
+        # Calcular la similitud con todas las películas valoradas
+        similar_movies = []
+        for idx in rated_movies:
+            similar_movies.extend(self.get_movie_similarity(idx).index.tolist())
+        
+        # Eliminar duplicados y películas ya valoradas
+        similar_movies = list(set(similar_movies) - set(rated_movies))
+        
+        # Ordenar las películas similares por su puntuación de similitud promedio
+        movie_scores = {}
+        for movie in similar_movies:
+            scores = []
+            for rated_movie in rated_movies:
+                similarity = cosine_similarity(self.tfidf_matrix[movie], self.tfidf_matrix[rated_movie])[0][0]
+                user_rating = user_ratings[str(rated_movie)]
+                scores.append(similarity * user_rating)
+            movie_scores[movie] = sum(scores) / len(scores)
+        
+        # Ordenar las películas por puntuación y obtener las top N
+        top_movies = sorted(movie_scores, key=movie_scores.get, reverse=True)[:10]
+        
+        return self.data.loc[top_movies][['title', 'year', 'genre']]
 
-        # Ejemplo simplificado: seleccionar películas no valoradas
-        rated_movie_indices = set(map(int, self.user_profiles[user_id]['ratings'].keys()))
-        recommendations = self.data.loc[~self.data.index.isin(rated_movie_indices)]
-        return recommendations[['title', 'year', 'genre']]
+
 
     def update_user_preferences(self, user_id, genre=None, actor=None, director=None, year=None, language=None):
         """
